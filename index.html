@@ -56,19 +56,11 @@ const CONFIG = {
   CAM_LERP: 0.15,
   HP_MAX: 100,
 
-  // 좀비
-  ZOMBIE_W: 22,
-  ZOMBIE_H: 44,
-  ZOMBIE_HP_MAX: 30,
-  ZOMBIE_SPEED: 2.0,
-  ZOMBIE_JUMP_V: 9,
-  ZOMBIE_DAMAGE: 10,
-  ZOMBIE_ATTACK_CD_MS: 900,
-  PLAYER_ATTACK_DMG: 15,
-  MAX_ZOMBIES: 6,
-  SPAWN_INTERVAL_MS: 2200,
-  DESPAWN_TILES: 60,         // 플레이어와 이만큼 떨어지면 제거
-  ZOMBIE_MIN_DEPTH_FROM_SURFACE: 6, // 표면 이만큼 아래(=어두운 곳)에만 스폰
+  // 밤낮 사이클 (한 사이클 4분)
+  DAY_LENGTH_MS: 4 * 60 * 1000,
+  NIGHT_DARKNESS: 0.78,  // 밤 최대 어둠 (0..1)
+  PLAYER_LIGHT_RADIUS: 200,
+  TORCH_LIGHT_RADIUS: 140,
 
   // 키 반복 간격 (ms)
   CURSOR_REPEAT_MS: 110,
@@ -80,6 +72,8 @@ const B = {
   AIR: 0, GRASS: 1, DIRT: 2, STONE: 3,
   COAL: 4, IRON: 5, DIAMOND: 6,
   LOG: 7, LEAVES: 8,
+  // 크래프팅 산출물
+  PLANK: 9, BRICK: 10, TORCH: 11,
 };
 
 // ore: stone 색 위에 oreColor로 점 4개 그림
@@ -94,7 +88,17 @@ const BLOCK_INFO = {
   [B.DIAMOND]: { name: 'diamond', base: STONE_BASE, shade: STONE_SHADE, solid: true, ore: '#5fe3ee' },
   [B.LOG]:     { name: 'log',     base: '#6b3e1e',  shade: '#3f2410',  solid: true  },
   [B.LEAVES]:  { name: 'leaves',  base: '#2e8a2a',  shade: '#1d5a1d',  solid: true  },
+  [B.PLANK]:   { name: 'plank',   base: '#c79b66',  shade: '#8a6a3f',  solid: true  },
+  [B.BRICK]:   { name: 'brick',   base: '#b8b8b8',  shade: '#6f6f6f',  solid: true  },
+  [B.TORCH]:   { name: 'torch',   base: '#ffd366',  shade: '#a87328',  solid: false, light: true },
 };
+
+// 크래프팅 레시피 (재료 → 산출물)
+const RECIPES = [
+  { name: 'Plank',  in: { [B.LOG]: 1 },                out: { id: B.PLANK, count: 4 } },
+  { name: 'Brick',  in: { [B.STONE]: 4 },              out: { id: B.BRICK, count: 4 } },
+  { name: 'Torch',  in: { [B.COAL]: 1, [B.PLANK]: 1 }, out: { id: B.TORCH, count: 4 } },
+];
 
 // ===========================================================================
 // === 2. Noise 유틸 ==========================================================
@@ -390,57 +394,6 @@ class Player {
 }
 
 // ===========================================================================
-// === 4.5 Zombie ============================================================
-// ===========================================================================
-class Zombie {
-  constructor(world, x, y) {
-    this.world = world;
-    this.w = CONFIG.ZOMBIE_W;
-    this.h = CONFIG.ZOMBIE_H;
-    this.x = x; this.y = y;
-    this.vx = 0; this.vy = 0;
-    this.onGround = false;
-    this.hp = CONFIG.ZOMBIE_HP_MAX;
-    this.attackCd = 0;
-    this.dead = false;
-  }
-  centerX() { return this.x + this.w / 2; }
-  centerY() { return this.y + this.h / 2; }
-  aabb() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
-
-  update(dt, target) {
-    // AI: target 방향으로 추적
-    const dx = target.centerX() - this.centerX();
-    const dir = Math.abs(dx) < 1 ? 0 : Math.sign(dx);
-    this.vx = dir * CONFIG.ZOMBIE_SPEED;
-
-    // 진행 방향에 벽 있으면 점프
-    if (this.onGround && dir !== 0) {
-      const T = CONFIG.TILE;
-      const probeX = dir > 0 ? this.x + this.w + 1 : this.x - 1;
-      const footY = this.y + this.h - 4;
-      const id = this.world.getBlock(Math.floor(probeX / T), Math.floor(footY / T));
-      if (BLOCK_INFO[id].solid) {
-        this.vy = -CONFIG.ZOMBIE_JUMP_V;
-        this.onGround = false;
-      }
-    }
-
-    // 중력
-    this.vy += CONFIG.GRAVITY;
-    if (this.vy > CONFIG.TERMINAL_V) this.vy = CONFIG.TERMINAL_V;
-
-    this.x += this.vx;
-    resolveAABBOnAxis(this, this.world, 'x');
-    this.y += this.vy;
-    this.onGround = false;
-    resolveAABBOnAxis(this, this.world, 'y');
-
-    if (this.attackCd > 0) this.attackCd -= dt;
-  }
-}
-
-// ===========================================================================
 // === 5. Input (키보드 전용) ================================================
 // ===========================================================================
 class Input {
@@ -454,7 +407,8 @@ class Input {
         'Space', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
         'KeyA', 'KeyD', 'KeyW', 'KeyS',
         'KeyI', 'KeyJ', 'KeyK', 'KeyL',
-        'KeyF', 'KeyR', 'KeyQ', 'KeyE',
+        'KeyF', 'KeyR', 'KeyQ', 'KeyE', 'KeyC',
+        'BracketLeft', 'BracketRight', 'Comma', 'Period', 'Enter',
         'Digit1','Digit2','Digit3','Digit4','Digit5','Digit6','Digit7','Digit8','Digit9',
       ]);
       if (used.has(e.code)) e.preventDefault();
@@ -476,13 +430,46 @@ class Input {
 // ===========================================================================
 // === 6. Renderer ===========================================================
 // ===========================================================================
+function lerp(a, b, t) { return a + (b - a) * t; }
+function hexToRgb(h) {
+  const v = parseInt(h.slice(1), 16);
+  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+}
+function lerpHex(a, b, t) {
+  const A = hexToRgb(a), B = hexToRgb(b);
+  const r = Math.round(lerp(A[0], B[0], t));
+  const g = Math.round(lerp(A[1], B[1], t));
+  const bl = Math.round(lerp(A[2], B[2], t));
+  return `rgb(${r},${g},${bl})`;
+}
+
+// worldTime → { phase, darkness, skyTop, skyBot }
+function getDaylight(worldTime) {
+  const t = (worldTime % CONFIG.DAY_LENGTH_MS) / CONFIG.DAY_LENGTH_MS; // 0..1
+  // 0.25 = 정오(가장 밝음), 0.75 = 한밤(가장 어둠)
+  const sun = Math.sin(2 * Math.PI * (t - 0.25)); // -1..1, 0.25에서 1
+  const light = (sun + 1) / 2; // 0..1
+  const darkness = (1 - light); // 0=낮 1=밤
+  let phase;
+  if (t < 0.2 || t > 0.85) phase = '새벽';
+  else if (t < 0.35) phase = '아침';
+  else if (t < 0.55) phase = '한낮';
+  else if (t < 0.7) phase = '저녁';
+  else phase = '밤';
+  // 하늘 색 보간
+  const skyTop = lerpHex('#0a0e22', '#79c4ff', light);
+  const skyBot = lerpHex('#1c2440', '#bfe3ff', light);
+  return { t, phase, darkness, skyTop, skyBot, light };
+}
+
 class Renderer {
-  constructor(canvas, world, player, getZombies) {
+  constructor(canvas, world, player, getCrafting, getWorldTime) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.world = world;
     this.player = player;
-    this.getZombies = getZombies || (() => []);
+    this.getCrafting = getCrafting || (() => ({ open: false }));
+    this.getWorldTime = getWorldTime || (() => 0);
     this.camX = player.x - canvas.width / 2;
     this.camY = player.y - canvas.height / 2;
     this.fps = 60;
@@ -503,9 +490,10 @@ class Renderer {
     const W = this.canvas.width, H = this.canvas.height;
     const T = CONFIG.TILE;
 
+    const daylight = getDaylight(this.getWorldTime());
     const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
-    skyGrad.addColorStop(0, '#79c4ff');
-    skyGrad.addColorStop(1, '#bfe3ff');
+    skyGrad.addColorStop(0, daylight.skyTop);
+    skyGrad.addColorStop(1, daylight.skyBot);
     ctx.fillStyle = skyGrad;
     ctx.fillRect(0, 0, W, H);
 
@@ -521,6 +509,17 @@ class Renderer {
         const info = BLOCK_INFO[id];
         const sx = Math.floor(tx * T - this.camX);
         const sy = Math.floor(ty * T - this.camY);
+        if (id === B.TORCH) {
+          // 막대
+          ctx.fillStyle = '#6b3e1e';
+          ctx.fillRect(sx + T / 2 - 2, sy + 12, 4, T - 14);
+          // 불꽃
+          ctx.fillStyle = '#ffd366';
+          ctx.fillRect(sx + T / 2 - 4, sy + 6, 8, 10);
+          ctx.fillStyle = '#ff8a3c';
+          ctx.fillRect(sx + T / 2 - 2, sy + 9, 4, 5);
+          continue;
+        }
         ctx.fillStyle = info.base;
         ctx.fillRect(sx, sy, T, T);
         if (this.world.getBlock(tx, ty - 1) === B.AIR) {
@@ -558,28 +557,6 @@ class Renderer {
     ctx.fillRect(csx + 2, csy + T - 6, 4, 4);
     ctx.fillRect(csx + T - 6, csy + T - 6, 4, 4);
 
-    // 좀비
-    for (const z of this.getZombies()) {
-      if (z.dead) continue;
-      const zsx = Math.floor(z.x - this.camX);
-      const zsy = Math.floor(z.y - this.camY);
-      if (zsx + z.w < 0 || zsx > W || zsy + z.h < 0 || zsy > H) continue;
-      ctx.fillStyle = '#3aa036';
-      ctx.fillRect(zsx, zsy, z.w, z.h);
-      ctx.fillStyle = '#1b5a18';
-      ctx.fillRect(zsx + 3, zsy + 4, z.w - 6, 10);
-      // 눈
-      ctx.fillStyle = '#c83838';
-      ctx.fillRect(zsx + 5, zsy + 7, 4, 4);
-      ctx.fillRect(zsx + z.w - 9, zsy + 7, 4, 4);
-      // HP 바
-      const ratio = Math.max(0, z.hp / CONFIG.ZOMBIE_HP_MAX);
-      ctx.fillStyle = 'rgba(0,0,0,0.65)';
-      ctx.fillRect(zsx, zsy - 7, z.w, 5);
-      ctx.fillStyle = '#e84a4a';
-      ctx.fillRect(zsx + 1, zsy - 6, Math.floor((z.w - 2) * ratio), 3);
-    }
-
     // 플레이어
     const psx = Math.floor(this.player.x - this.camX);
     const psy = Math.floor(this.player.y - this.camY);
@@ -588,10 +565,98 @@ class Renderer {
     ctx.fillStyle = '#e2c1a0';
     ctx.fillRect(psx + 3, psy + 4, this.player.w - 6, 10);
 
-    this.renderHUD(ctx, W, H);
+    // 어둠 오버레이 (밤일수록 진해짐)
+    const darkAlpha = daylight.darkness * CONFIG.NIGHT_DARKNESS;
+    if (darkAlpha > 0.02) {
+      // 1) 전체 어둠
+      ctx.save();
+      ctx.fillStyle = `rgba(5,8,20,${darkAlpha})`;
+      ctx.fillRect(0, 0, W, H);
+      // 2) 플레이어 주변 + TORCH 주변에 라이트 컷아웃
+      ctx.globalCompositeOperation = 'destination-out';
+      const drawLight = (lx, ly, radius) => {
+        const g = ctx.createRadialGradient(lx, ly, 0, lx, ly, radius);
+        g.addColorStop(0, 'rgba(0,0,0,1)');
+        g.addColorStop(0.6, 'rgba(0,0,0,0.6)');
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(lx - radius, ly - radius, radius * 2, radius * 2);
+      };
+      drawLight(psx + this.player.w / 2, psy + this.player.h / 2, CONFIG.PLAYER_LIGHT_RADIUS);
+      // 보이는 영역의 TORCH
+      for (let ty = startTy; ty <= endTy; ty++) {
+        for (let tx = startTx; tx <= endTx; tx++) {
+          if (this.world.getBlock(tx, ty) === B.TORCH) {
+            const lx = tx * T - this.camX + T / 2;
+            const ly = ty * T - this.camY + T / 2;
+            drawLight(lx, ly, CONFIG.TORCH_LIGHT_RADIUS);
+          }
+        }
+      }
+      ctx.restore();
+    }
+
+    this.renderHUD(ctx, W, H, daylight);
+    if (this.getCrafting().open) this.renderCraftingPanel(ctx, W, H);
   }
 
-  renderHUD(ctx, W, H) {
+  renderCraftingPanel(ctx, W, H) {
+    const cr = this.getCrafting();
+    const pw = 380, ph = 280;
+    const px = Math.floor((W - pw) / 2), py = Math.floor((H - ph) / 2);
+    ctx.fillStyle = 'rgba(10,12,20,0.92)';
+    ctx.fillRect(px, py, pw, ph);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+    ctx.strokeRect(px + 0.5, py + 0.5, pw - 1, ph - 1);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+    ctx.fillText('크래프팅', px + 16, py + 14);
+    ctx.font = '12px monospace';
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fillText('[ / , : 위    ] / . : 아래    Enter : 제작    C / Esc : 닫기', px + 16, py + 40);
+
+    const listX = px + 16, listY = py + 70, rowH = 44;
+    for (let i = 0; i < RECIPES.length; i++) {
+      const r = RECIPES[i];
+      const rowY = listY + i * rowH;
+      const sel = (i === cr.selected);
+      const ok = canCraft(r);
+      ctx.fillStyle = sel ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.04)';
+      ctx.fillRect(listX, rowY, pw - 32, rowH - 6);
+      // 산출물 아이콘
+      const outInfo = BLOCK_INFO[r.out.id];
+      ctx.fillStyle = outInfo.base;
+      ctx.fillRect(listX + 6, rowY + 6, 26, 26);
+      ctx.fillStyle = outInfo.shade;
+      ctx.fillRect(listX + 6, rowY + 28, 26, 4);
+      // 텍스트
+      ctx.fillStyle = ok ? '#fff' : '#888';
+      ctx.font = 'bold 14px sans-serif';
+      ctx.fillText(`${r.name} x${r.out.count}`, listX + 42, rowY + 6);
+      // 재료
+      ctx.font = '12px monospace';
+      const parts = [];
+      for (const id in r.in) {
+        const info = BLOCK_INFO[parseInt(id, 10)];
+        const have = countInInventory(parseInt(id, 10));
+        parts.push(`${info.name} ${have}/${r.in[id]}`);
+      }
+      ctx.fillStyle = ok ? '#9fe39f' : '#e39f9f';
+      ctx.fillText(parts.join('   '), listX + 42, rowY + 24);
+    }
+
+    if (cr.messageTimer > 0 && cr.message) {
+      ctx.fillStyle = '#ffd366';
+      ctx.font = 'bold 14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(cr.message, px + pw / 2, py + ph - 28);
+      ctx.textAlign = 'left';
+    }
+  }
+
+  renderHUD(ctx, W, H, daylight) {
     // HP
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     ctx.fillRect(10, 10, 204, 22);
@@ -609,13 +674,14 @@ class Renderer {
     const ty = Math.floor(this.player.centerY() / CONFIG.TILE);
     ctx.textAlign = 'right';
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.fillRect(W - 200, 10, 190, 62);
+    ctx.fillRect(W - 200, 10, 190, 80);
     ctx.fillStyle = '#fff';
     ctx.font = '13px monospace';
     ctx.textBaseline = 'top';
     ctx.fillText(`FPS ${this.fps.toFixed(0)}`, W - 18, 16);
     ctx.fillText(`x=${tx} y=${ty}`, W - 18, 34);
     ctx.fillText(`cur ${this.player.cursorDx},${this.player.cursorDy}`, W - 18, 52);
+    if (daylight) ctx.fillText(`${daylight.phase}`, W - 18, 70);
     ctx.textAlign = 'left';
 
     // 핫바
@@ -660,7 +726,7 @@ class Renderer {
 
     // 키 도움말 (좌하단)
     ctx.fillStyle = 'rgba(0,0,0,0.45)';
-    ctx.fillRect(10, H - 116, 280, 100);
+    ctx.fillRect(10, H - 134, 290, 118);
     ctx.fillStyle = '#fff';
     ctx.font = '12px monospace';
     ctx.textBaseline = 'top';
@@ -670,9 +736,10 @@ class Renderer {
       '커서 : I(↑) J(←) K(↓) L(→)',
       '채굴 : F     설치 : R',
       '슬롯 : 1~9   ◀ Q   E ▶',
+      '크래프팅 : C 열기 · Esc 닫기',
     ];
     for (let i = 0; i < helpLines.length; i++) {
-      ctx.fillText(helpLines[i], 18, H - 110 + i * 18);
+      ctx.fillText(helpLines[i], 18, H - 128 + i * 18);
     }
   }
 
@@ -698,12 +765,15 @@ window.addEventListener('resize', resize);
 const world = new World(CONFIG.WORLD_SEED);
 const player = new Player(world);
 const input = new Input();
-let zombies = [];
-const renderer = new Renderer(canvas, world, player, () => zombies);
+
+// 게임 상태
+let worldTime = CONFIG.DAY_LENGTH_MS * 0.25; // 아침에서 시작
+let crafting = { open: false, selected: 0, message: '', messageTimer: 0 };
+
+const renderer = new Renderer(canvas, world, player, () => crafting, () => worldTime);
 
 let cursorTimer = 0;
 let actionCooldown = 0;
-let spawnTimer = 0;
 
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -739,22 +809,8 @@ function targetTile() {
   return { tx: p.tx + player.cursorDx, ty: p.ty + player.cursorDy };
 }
 
-function tryMineOrAttack() {
+function tryMine() {
   const t = targetTile();
-  const T = CONFIG.TILE;
-  const tileBox = { x: t.tx * T, y: t.ty * T, w: T, h: T };
-  // 커서 타일에 좀비가 겹치면 좀비 공격 우선
-  for (const z of zombies) {
-    if (z.dead) continue;
-    if (aabbOverlap(z.aabb(), tileBox)) {
-      z.hp -= CONFIG.PLAYER_ATTACK_DMG;
-      const dir = Math.sign(z.centerX() - player.centerX()) || 1;
-      z.vx = dir * 6; z.vy = -5;
-      if (z.hp <= 0) z.dead = true;
-      return;
-    }
-  }
-  // 채굴
   const id = world.getBlock(t.tx, t.ty);
   if (id === B.AIR) return;
   world.setBlock(t.tx, t.ty, B.AIR);
@@ -777,7 +833,7 @@ function updateActions(dt) {
   actionCooldown -= dt;
   if (actionCooldown > 0) { input.consumePressed('KeyF'); input.consumePressed('KeyR'); return; }
   if (input.isDown('KeyF')) {
-    tryMineOrAttack(); actionCooldown = CONFIG.ACTION_COOLDOWN_MINE_MS;
+    tryMine(); actionCooldown = CONFIG.ACTION_COOLDOWN_MINE_MS;
     input.consumePressed('KeyF');
   } else if (input.isDown('KeyR')) {
     tryPlace(); actionCooldown = CONFIG.ACTION_COOLDOWN_PLACE_MS;
@@ -785,64 +841,65 @@ function updateActions(dt) {
   }
 }
 
-function respawnPlayer() {
-  const spawnTileX = 8;
-  const surfaceY = world.findSurfaceY(spawnTileX);
-  player.x = spawnTileX * CONFIG.TILE + CONFIG.TILE / 2 - player.w / 2;
-  player.y = surfaceY * CONFIG.TILE - player.h - 2;
-  player.vx = 0; player.vy = 0;
-  player.hp = CONFIG.HP_MAX;
-  zombies = []; // 죽으면 다 사라짐
+// ===========================================================================
+// === 크래프팅 ==============================================================
+// ===========================================================================
+function countInInventory(id) {
+  let n = 0;
+  for (const s of player.slots) if (s.id === id) n += s.count;
+  return n;
 }
 
-function trySpawnZombie() {
-  if (zombies.length >= CONFIG.MAX_ZOMBIES) return;
-  const T = CONFIG.TILE;
-  const pt = player.playerTile();
-  for (let attempt = 0; attempt < 25; attempt++) {
-    const offX = (Math.random() < 0.5 ? -1 : 1) * (10 + Math.floor(Math.random() * 14));
-    const offY = -4 + Math.floor(Math.random() * 36);
-    const tx = pt.tx + offX;
-    const ty = pt.ty + offY;
-    // 화면 안이면 패스 (시야 밖에서만 스폰)
-    const sx = tx * T - renderer.camX;
-    const sy = ty * T - renderer.camY;
-    if (sx > -T && sx < canvas.width && sy > -T && sy < canvas.height) continue;
-    // 발 밑 solid, 머리 2칸 air
-    if (!BLOCK_INFO[world.getBlock(tx, ty)].solid) continue;
-    if (BLOCK_INFO[world.getBlock(tx, ty - 1)].solid) continue;
-    if (BLOCK_INFO[world.getBlock(tx, ty - 2)].solid) continue;
-    // 어두운 곳 = 표면에서 일정 깊이 아래
-    const surface = world.findSurfaceY(tx);
-    if (ty - 1 < surface + CONFIG.ZOMBIE_MIN_DEPTH_FROM_SURFACE) continue;
-    const zx = tx * T + (T - CONFIG.ZOMBIE_W) / 2;
-    const zy = ty * T - CONFIG.ZOMBIE_H;
-    zombies.push(new Zombie(world, zx, zy));
+function consumeFromInventory(id, n) {
+  for (const s of player.slots) {
+    if (s.id !== id) continue;
+    const take = Math.min(s.count, n);
+    s.count -= take;
+    n -= take;
+    if (s.count === 0) s.id = B.AIR;
+    if (n === 0) return true;
+  }
+  return n === 0;
+}
+
+function canCraft(recipe) {
+  for (const id in recipe.in) {
+    if (countInInventory(parseInt(id, 10)) < recipe.in[id]) return false;
+  }
+  return true;
+}
+
+function doCraft(recipe) {
+  if (!canCraft(recipe)) {
+    crafting.message = '재료가 부족해'; crafting.messageTimer = 1500;
     return;
   }
+  for (const id in recipe.in) consumeFromInventory(parseInt(id, 10), recipe.in[id]);
+  for (let i = 0; i < recipe.out.count; i++) player.addItem(recipe.out.id);
+  crafting.message = `${recipe.name} x${recipe.out.count} 제작!`;
+  crafting.messageTimer = 1500;
 }
 
-function updateZombies(dt) {
-  for (const z of zombies) {
-    if (z.dead) continue;
-    z.update(dt, player);
-    // 접촉 데미지
-    if (z.attackCd <= 0 && aabbOverlap(z.aabb(), player.aabb())) {
-      player.hp = Math.max(0, player.hp - CONFIG.ZOMBIE_DAMAGE);
-      z.attackCd = CONFIG.ZOMBIE_ATTACK_CD_MS;
-      // 플레이어 약한 넉백
-      const dir = Math.sign(player.centerX() - z.centerX()) || 1;
-      player.vx = dir * 5; player.vy = -4;
-    }
+function updateCrafting(dt) {
+  if (crafting.messageTimer > 0) crafting.messageTimer -= dt;
+
+  if (input.consumePressed('KeyC')) {
+    crafting.open = !crafting.open;
   }
-  // despawn: 죽었거나 너무 멀어졌거나 월드 밖으로 떨어진 좀비
-  const T = CONFIG.TILE;
-  zombies = zombies.filter(z =>
-    !z.dead &&
-    Math.abs(z.centerX() - player.centerX()) < CONFIG.DESPAWN_TILES * T &&
-    z.y < CONFIG.CHUNK_H * T
-  );
-  if (player.hp <= 0) respawnPlayer();
+  if (input.consumePressed('Escape')) {
+    crafting.open = false;
+  }
+  if (!crafting.open) return;
+
+  if (input.consumePressed('BracketLeft') || input.consumePressed('Comma')) {
+    crafting.selected = (crafting.selected - 1 + RECIPES.length) % RECIPES.length;
+  }
+  if (input.consumePressed('BracketRight') || input.consumePressed('Period')) {
+    crafting.selected = (crafting.selected + 1) % RECIPES.length;
+  }
+  if (input.consumePressed('Enter')) {
+    doCraft(RECIPES[crafting.selected]);
+  }
 }
 
 let lastT = performance.now();
@@ -850,18 +907,20 @@ function loop(now) {
   const dt = Math.min(33, now - lastT);
   lastT = now;
 
-  player.update(input);
-  updateCursor(dt);
-  updateSlotKeys();
-  updateActions(dt);
+  worldTime += dt;
 
-  // 좀비 스폰 (주기적 시도)
-  spawnTimer -= dt;
-  if (spawnTimer <= 0) {
-    trySpawnZombie();
-    spawnTimer = CONFIG.SPAWN_INTERVAL_MS;
+  // 크래프팅 패널 열려 있으면 플레이어 이동/액션 멈춤
+  if (!crafting.open) {
+    player.update(input);
+    updateCursor(dt);
+    updateSlotKeys();
+    updateActions(dt);
+  } else {
+    // 패널 열려도 중력은 적용 (붕 뜬 채로 멈추지 않게)
+    player.vx = 0;
+    player.update({ isDown: () => false });
   }
-  updateZombies(dt);
+  updateCrafting(dt);
 
   renderer.updateCamera();
   renderer.tickFPS(now);
