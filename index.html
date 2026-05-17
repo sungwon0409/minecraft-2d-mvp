@@ -446,17 +446,19 @@ function lerpHex(a, b, t) {
 // worldTime → { phase, darkness, skyTop, skyBot }
 function getDaylight(worldTime) {
   const t = (worldTime % CONFIG.DAY_LENGTH_MS) / CONFIG.DAY_LENGTH_MS; // 0..1
-  // 0.25 = 정오(가장 밝음), 0.75 = 한밤(가장 어둠)
-  const sun = Math.sin(2 * Math.PI * (t - 0.25)); // -1..1, 0.25에서 1
-  const light = (sun + 1) / 2; // 0..1
-  const darkness = (1 - light); // 0=낮 1=밤
+  // 정오 = 0.25에서 가장 밝음, 한밤 = 0.75에서 가장 어둠
+  const sun = Math.cos(2 * Math.PI * (t - 0.25)); // -1..1
+  // 정오 부근 평탄하게: light에 약간 클램프해서 한낮은 어둠 0
+  const lightRaw = (sun + 1) / 2; // 0..1
+  const light = Math.min(1, lightRaw * 1.15); // 살짝 부풀려 한낮을 길게
+  const darkness = 1 - light;
   let phase;
-  if (t < 0.2 || t > 0.85) phase = '새벽';
-  else if (t < 0.35) phase = '아침';
-  else if (t < 0.55) phase = '한낮';
-  else if (t < 0.7) phase = '저녁';
-  else phase = '밤';
-  // 하늘 색 보간
+  if (t < 0.12) phase = '새벽';
+  else if (t < 0.20) phase = '아침';
+  else if (t < 0.45) phase = '한낮';
+  else if (t < 0.55) phase = '저녁';
+  else if (t < 0.92) phase = '밤';
+  else phase = '새벽';
   const skyTop = lerpHex('#0a0e22', '#79c4ff', light);
   const skyBot = lerpHex('#1c2440', '#bfe3ff', light);
   return { t, phase, darkness, skyTop, skyBot, light };
@@ -576,9 +578,9 @@ class Renderer {
       ctx.globalCompositeOperation = 'destination-out';
       const drawLight = (lx, ly, radius) => {
         const g = ctx.createRadialGradient(lx, ly, 0, lx, ly, radius);
-        g.addColorStop(0, 'rgba(0,0,0,1)');
-        g.addColorStop(0.6, 'rgba(0,0,0,0.6)');
-        g.addColorStop(1, 'rgba(0,0,0,0)');
+        g.addColorStop(0,   'rgba(0,0,0,1)');
+        g.addColorStop(0.35,'rgba(0,0,0,1)');
+        g.addColorStop(1,   'rgba(0,0,0,0)');
         ctx.fillStyle = g;
         ctx.fillRect(lx - radius, ly - radius, radius * 2, radius * 2);
       };
