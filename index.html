@@ -56,6 +56,20 @@ const CONFIG = {
   CAM_LERP: 0.15,
   HP_MAX: 100,
 
+  // 좀비
+  ZOMBIE_W: 22,
+  ZOMBIE_H: 44,
+  ZOMBIE_HP_MAX: 30,
+  ZOMBIE_SPEED: 2.0,
+  ZOMBIE_JUMP_V: 9,
+  ZOMBIE_DAMAGE: 10,
+  ZOMBIE_ATTACK_CD_MS: 900,
+  PLAYER_ATTACK_DMG: 15,
+  MAX_ZOMBIES: 6,
+  SPAWN_INTERVAL_MS: 2200,
+  DESPAWN_TILES: 60,         // 플레이어와 이만큼 떨어지면 제거
+  ZOMBIE_MIN_DEPTH_FROM_SURFACE: 6, // 표면 이만큼 아래(=어두운 곳)에만 스폰
+
   // 키 반복 간격 (ms)
   CURSOR_REPEAT_MS: 110,
   ACTION_COOLDOWN_MINE_MS: 170,
@@ -271,6 +285,40 @@ class World {
 }
 
 // ===========================================================================
+// === 3.5 공통 헬퍼 (AABB) ==================================================
+// ===========================================================================
+// e: { x, y, w, h, vx, vy, onGround }
+function resolveAABBOnAxis(e, world, axis) {
+  const T = CONFIG.TILE;
+  const minTx = Math.floor(e.x / T) - 1;
+  const maxTx = Math.floor((e.x + e.w) / T) + 1;
+  const minTy = Math.floor(e.y / T) - 1;
+  const maxTy = Math.floor((e.y + e.h) / T) + 1;
+  for (let ty = minTy; ty <= maxTy; ty++) {
+    for (let tx = minTx; tx <= maxTx; tx++) {
+      const id = world.getBlock(tx, ty);
+      if (!BLOCK_INFO[id].solid) continue;
+      const bx = tx * T, by = ty * T;
+      if (e.x + e.w <= bx || e.x >= bx + T) continue;
+      if (e.y + e.h <= by || e.y >= by + T) continue;
+      if (axis === 'x') {
+        if (e.vx > 0) e.x = bx - e.w;
+        else if (e.vx < 0) e.x = bx + T;
+        e.vx = 0;
+      } else {
+        if (e.vy > 0) { e.y = by - e.h; e.onGround = true; }
+        else if (e.vy < 0) { e.y = by + T; }
+        e.vy = 0;
+      }
+    }
+  }
+}
+
+function aabbOverlap(a, b) {
+  return !(a.x + a.w <= b.x || a.x >= b.x + b.w || a.y + a.h <= b.y || a.y >= b.y + b.h);
+}
+
+// ===========================================================================
 // === 4. Player =============================================================
 // ===========================================================================
 class Player {
@@ -317,38 +365,10 @@ class Player {
     if (this.vy > CONFIG.TERMINAL_V) this.vy = CONFIG.TERMINAL_V;
 
     this.x += this.vx;
-    this.resolveCollisions('x');
+    resolveAABBOnAxis(this, this.world, 'x');
     this.y += this.vy;
     this.onGround = false;
-    this.resolveCollisions('y');
-  }
-
-  resolveCollisions(axis) {
-    const T = CONFIG.TILE;
-    const minTx = Math.floor(this.x / T) - 1;
-    const maxTx = Math.floor((this.x + this.w) / T) + 1;
-    const minTy = Math.floor(this.y / T) - 1;
-    const maxTy = Math.floor((this.y + this.h) / T) + 1;
-
-    for (let ty = minTy; ty <= maxTy; ty++) {
-      for (let tx = minTx; tx <= maxTx; tx++) {
-        const id = this.world.getBlock(tx, ty);
-        if (!BLOCK_INFO[id].solid) continue;
-        const bx = tx * T, by = ty * T;
-        if (this.x + this.w <= bx || this.x >= bx + T) continue;
-        if (this.y + this.h <= by || this.y >= by + T) continue;
-
-        if (axis === 'x') {
-          if (this.vx > 0) this.x = bx - this.w;
-          else if (this.vx < 0) this.x = bx + T;
-          this.vx = 0;
-        } else {
-          if (this.vy > 0) { this.y = by - this.h; this.onGround = true; }
-          else if (this.vy < 0) { this.y = by + T; }
-          this.vy = 0;
-        }
-      }
-    }
+    resolveAABBOnAxis(this, this.world, 'y');
   }
 
   addItem(id) {
@@ -367,6 +387,57 @@ class Player {
   }
 
   aabb() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
+}
+
+// ===========================================================================
+// === 4.5 Zombie ============================================================
+// ===========================================================================
+class Zombie {
+  constructor(world, x, y) {
+    this.world = world;
+    this.w = CONFIG.ZOMBIE_W;
+    this.h = CONFIG.ZOMBIE_H;
+    this.x = x; this.y = y;
+    this.vx = 0; this.vy = 0;
+    this.onGround = false;
+    this.hp = CONFIG.ZOMBIE_HP_MAX;
+    this.attackCd = 0;
+    this.dead = false;
+  }
+  centerX() { return this.x + this.w / 2; }
+  centerY() { return this.y + this.h / 2; }
+  aabb() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
+
+  update(dt, target) {
+    // AI: target 방향으로 추적
+    const dx = target.centerX() - this.centerX();
+    const dir = Math.abs(dx) < 1 ? 0 : Math.sign(dx);
+    this.vx = dir * CONFIG.ZOMBIE_SPEED;
+
+    // 진행 방향에 벽 있으면 점프
+    if (this.onGround && dir !== 0) {
+      const T = CONFIG.TILE;
+      const probeX = dir > 0 ? this.x + this.w + 1 : this.x - 1;
+      const footY = this.y + this.h - 4;
+      const id = this.world.getBlock(Math.floor(probeX / T), Math.floor(footY / T));
+      if (BLOCK_INFO[id].solid) {
+        this.vy = -CONFIG.ZOMBIE_JUMP_V;
+        this.onGround = false;
+      }
+    }
+
+    // 중력
+    this.vy += CONFIG.GRAVITY;
+    if (this.vy > CONFIG.TERMINAL_V) this.vy = CONFIG.TERMINAL_V;
+
+    this.x += this.vx;
+    resolveAABBOnAxis(this, this.world, 'x');
+    this.y += this.vy;
+    this.onGround = false;
+    resolveAABBOnAxis(this, this.world, 'y');
+
+    if (this.attackCd > 0) this.attackCd -= dt;
+  }
 }
 
 // ===========================================================================
@@ -406,11 +477,12 @@ class Input {
 // === 6. Renderer ===========================================================
 // ===========================================================================
 class Renderer {
-  constructor(canvas, world, player) {
+  constructor(canvas, world, player, getZombies) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.world = world;
     this.player = player;
+    this.getZombies = getZombies || (() => []);
     this.camX = player.x - canvas.width / 2;
     this.camY = player.y - canvas.height / 2;
     this.fps = 60;
@@ -485,6 +557,28 @@ class Renderer {
     ctx.fillRect(csx + T - 6, csy + 2, 4, 4);
     ctx.fillRect(csx + 2, csy + T - 6, 4, 4);
     ctx.fillRect(csx + T - 6, csy + T - 6, 4, 4);
+
+    // 좀비
+    for (const z of this.getZombies()) {
+      if (z.dead) continue;
+      const zsx = Math.floor(z.x - this.camX);
+      const zsy = Math.floor(z.y - this.camY);
+      if (zsx + z.w < 0 || zsx > W || zsy + z.h < 0 || zsy > H) continue;
+      ctx.fillStyle = '#3aa036';
+      ctx.fillRect(zsx, zsy, z.w, z.h);
+      ctx.fillStyle = '#1b5a18';
+      ctx.fillRect(zsx + 3, zsy + 4, z.w - 6, 10);
+      // 눈
+      ctx.fillStyle = '#c83838';
+      ctx.fillRect(zsx + 5, zsy + 7, 4, 4);
+      ctx.fillRect(zsx + z.w - 9, zsy + 7, 4, 4);
+      // HP 바
+      const ratio = Math.max(0, z.hp / CONFIG.ZOMBIE_HP_MAX);
+      ctx.fillStyle = 'rgba(0,0,0,0.65)';
+      ctx.fillRect(zsx, zsy - 7, z.w, 5);
+      ctx.fillStyle = '#e84a4a';
+      ctx.fillRect(zsx + 1, zsy - 6, Math.floor((z.w - 2) * ratio), 3);
+    }
 
     // 플레이어
     const psx = Math.floor(this.player.x - this.camX);
@@ -604,10 +698,12 @@ window.addEventListener('resize', resize);
 const world = new World(CONFIG.WORLD_SEED);
 const player = new Player(world);
 const input = new Input();
-const renderer = new Renderer(canvas, world, player);
+let zombies = [];
+const renderer = new Renderer(canvas, world, player, () => zombies);
 
 let cursorTimer = 0;
 let actionCooldown = 0;
+let spawnTimer = 0;
 
 function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -643,8 +739,22 @@ function targetTile() {
   return { tx: p.tx + player.cursorDx, ty: p.ty + player.cursorDy };
 }
 
-function tryMine() {
+function tryMineOrAttack() {
   const t = targetTile();
+  const T = CONFIG.TILE;
+  const tileBox = { x: t.tx * T, y: t.ty * T, w: T, h: T };
+  // 커서 타일에 좀비가 겹치면 좀비 공격 우선
+  for (const z of zombies) {
+    if (z.dead) continue;
+    if (aabbOverlap(z.aabb(), tileBox)) {
+      z.hp -= CONFIG.PLAYER_ATTACK_DMG;
+      const dir = Math.sign(z.centerX() - player.centerX()) || 1;
+      z.vx = dir * 6; z.vy = -5;
+      if (z.hp <= 0) z.dead = true;
+      return;
+    }
+  }
+  // 채굴
   const id = world.getBlock(t.tx, t.ty);
   if (id === B.AIR) return;
   world.setBlock(t.tx, t.ty, B.AIR);
@@ -667,12 +777,72 @@ function updateActions(dt) {
   actionCooldown -= dt;
   if (actionCooldown > 0) { input.consumePressed('KeyF'); input.consumePressed('KeyR'); return; }
   if (input.isDown('KeyF')) {
-    tryMine(); actionCooldown = CONFIG.ACTION_COOLDOWN_MINE_MS;
+    tryMineOrAttack(); actionCooldown = CONFIG.ACTION_COOLDOWN_MINE_MS;
     input.consumePressed('KeyF');
   } else if (input.isDown('KeyR')) {
     tryPlace(); actionCooldown = CONFIG.ACTION_COOLDOWN_PLACE_MS;
     input.consumePressed('KeyR');
   }
+}
+
+function respawnPlayer() {
+  const spawnTileX = 8;
+  const surfaceY = world.findSurfaceY(spawnTileX);
+  player.x = spawnTileX * CONFIG.TILE + CONFIG.TILE / 2 - player.w / 2;
+  player.y = surfaceY * CONFIG.TILE - player.h - 2;
+  player.vx = 0; player.vy = 0;
+  player.hp = CONFIG.HP_MAX;
+  zombies = []; // 죽으면 다 사라짐
+}
+
+function trySpawnZombie() {
+  if (zombies.length >= CONFIG.MAX_ZOMBIES) return;
+  const T = CONFIG.TILE;
+  const pt = player.playerTile();
+  for (let attempt = 0; attempt < 25; attempt++) {
+    const offX = (Math.random() < 0.5 ? -1 : 1) * (10 + Math.floor(Math.random() * 14));
+    const offY = -4 + Math.floor(Math.random() * 36);
+    const tx = pt.tx + offX;
+    const ty = pt.ty + offY;
+    // 화면 안이면 패스 (시야 밖에서만 스폰)
+    const sx = tx * T - renderer.camX;
+    const sy = ty * T - renderer.camY;
+    if (sx > -T && sx < canvas.width && sy > -T && sy < canvas.height) continue;
+    // 발 밑 solid, 머리 2칸 air
+    if (!BLOCK_INFO[world.getBlock(tx, ty)].solid) continue;
+    if (BLOCK_INFO[world.getBlock(tx, ty - 1)].solid) continue;
+    if (BLOCK_INFO[world.getBlock(tx, ty - 2)].solid) continue;
+    // 어두운 곳 = 표면에서 일정 깊이 아래
+    const surface = world.findSurfaceY(tx);
+    if (ty - 1 < surface + CONFIG.ZOMBIE_MIN_DEPTH_FROM_SURFACE) continue;
+    const zx = tx * T + (T - CONFIG.ZOMBIE_W) / 2;
+    const zy = ty * T - CONFIG.ZOMBIE_H;
+    zombies.push(new Zombie(world, zx, zy));
+    return;
+  }
+}
+
+function updateZombies(dt) {
+  for (const z of zombies) {
+    if (z.dead) continue;
+    z.update(dt, player);
+    // 접촉 데미지
+    if (z.attackCd <= 0 && aabbOverlap(z.aabb(), player.aabb())) {
+      player.hp = Math.max(0, player.hp - CONFIG.ZOMBIE_DAMAGE);
+      z.attackCd = CONFIG.ZOMBIE_ATTACK_CD_MS;
+      // 플레이어 약한 넉백
+      const dir = Math.sign(player.centerX() - z.centerX()) || 1;
+      player.vx = dir * 5; player.vy = -4;
+    }
+  }
+  // despawn: 죽었거나 너무 멀어졌거나 월드 밖으로 떨어진 좀비
+  const T = CONFIG.TILE;
+  zombies = zombies.filter(z =>
+    !z.dead &&
+    Math.abs(z.centerX() - player.centerX()) < CONFIG.DESPAWN_TILES * T &&
+    z.y < CONFIG.CHUNK_H * T
+  );
+  if (player.hp <= 0) respawnPlayer();
 }
 
 let lastT = performance.now();
@@ -684,6 +854,15 @@ function loop(now) {
   updateCursor(dt);
   updateSlotKeys();
   updateActions(dt);
+
+  // 좀비 스폰 (주기적 시도)
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    trySpawnZombie();
+    spawnTimer = CONFIG.SPAWN_INTERVAL_MS;
+  }
+  updateZombies(dt);
+
   renderer.updateCamera();
   renderer.tickFPS(now);
   renderer.render();
