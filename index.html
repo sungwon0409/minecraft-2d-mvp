@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<title>2D Minecraft — Phase 1 (키보드)</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #6cb6ff; overflow: hidden; }
+  body { font-family: -apple-system, "SF Pro", Helvetica, Arial, sans-serif; }
+  canvas { display: block; image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+'use strict';
+
+// ===========================================================================
+// === 1. CONFIG =============================================================
+// ===========================================================================
+const CONFIG = {
+  TILE: 32,
+  CHUNK_W: 16,
+  CHUNK_H: 256,
+  WORLD_SEED: 1337,
+
+  SURFACE_BASE: 80,
+  SURFACE_AMPL: 12,
+  SURFACE_FREQ: 0.06,
+
+  PLAYER_W: 22,
+  PLAYER_H: 44,
+  MOVE_SPEED: 4.5,
+  JUMP_V: 11,
+  GRAVITY: 0.55,
+  TERMINAL_V: 16,
+
+  REACH_TILES: 5, // 박스 클램프(±5)
+  HOTBAR_SLOTS: 9,
+
+  CAM_LERP: 0.15,
+  HP_MAX: 100,
+
+  // 키 반복 간격 (ms)
+  CURSOR_REPEAT_MS: 110,
+  ACTION_COOLDOWN_MINE_MS: 170,
+  ACTION_COOLDOWN_PLACE_MS: 200,
+};
+
+const B = { AIR: 0, GRASS: 1, DIRT: 2, STONE: 3 };
+
+const BLOCK_INFO = {
+  [B.AIR]:   { name: 'air',   base: null,      shade: null,      solid: false },
+  [B.GRASS]: { name: 'grass', base: '#5fbf3a', shade: '#3f8a25', solid: true  },
+  [B.DIRT]:  { name: 'dirt',  base: '#8a5a32', shade: '#5e3c1f', solid: true  },
+  [B.STONE]: { name: 'stone', base: '#888a8d', shade: '#5a5c5f', solid: true  },
+};
+
+// ===========================================================================
+// === 2. Noise 유틸 ==========================================================
+// ===========================================================================
+function hash1(x, seed) {
+  let h = (x * 374761393) ^ (seed * 668265263);
+  h = (h ^ (h >>> 13)) * 1274126177;
+  h = h ^ (h >>> 16);
+  return ((h >>> 0) % 100000) / 100000;
+}
+function cerp(a, b, t) { const f = (1 - Math.cos(t * Math.PI)) * 0.5; return a * (1 - f) + b * f; }
+function smoothNoise1D(x, seed, freq) {
+  const sx = x * freq, i = Math.floor(sx), t = sx - i;
+  return cerp(hash1(i, seed), hash1(i + 1, seed), t);
+}
+function fbm1D(x, seed, freq, octaves) {
+  let sum = 0, amp = 1, f = freq, norm = 0;
+  for (let o = 0; o < octaves; o++) {
+    sum += smoothNoise1D(x, seed + o * 101, f) * amp;
+    norm += amp; amp *= 0.5; f *= 2;
+  }
+  return sum / norm;
+}
+
+// ===========================================================================
+// === 3. World / Chunk ======================================================
+// ===========================================================================
+class Chunk {
+  constructor(cx) {
+    this.cx = cx;
+    this.blocks = new Uint8Array(CONFIG.CHUNK_W * CONFIG.CHUNK_H);
+  }
+}
+
+class World {
+  constructor(seed) { this.seed = seed; this.chunks = new Map(); }
+
+  getChunk(cx) {
+    let c = this.chunks.get(cx);
+    if (!c) { c = this.generateChunk(cx); this.chunks.set(cx, c); }
+    return c;
+  }
+
+  generateChunk(cx) {
+    const c = new Chunk(cx);
+    const W = CONFIG.CHUNK_W, H = CONFIG.CHUNK_H;
+    for (let lx = 0; lx < W; lx++) {
+      const wx = cx * W + lx;
+      const n = fbm1D(wx, this.seed, CONFIG.SURFACE_FREQ, 3);
+      const surface = Math.floor(CONFIG.SURFACE_BASE + (n - 0.5) * 2 * CONFIG.SURFACE_AMPL);
+      for (let y = 0; y < H; y++) {
+        let id = B.AIR;
+        if (y === surface) id = B.GRASS;
+        else if (y > surface && y < surface + 4) id = B.DIRT;
+        else if (y >= surface + 4) id = B.STONE;
+        c.blocks[y * W + lx] = id;
+      }
+    }
+    return c;
+  }
+
+  getBlock(wx, wy) {
+    if (wy < 0 || wy >= CONFIG.CHUNK_H) return B.AIR;
+    const cx = Math.floor(wx / CONFIG.CHUNK_W);
+    const lx = ((wx % CONFIG.CHUNK_W) + CONFIG.CHUNK_W) % CONFIG.CHUNK_W;
+    return this.getChunk(cx).blocks[wy * CONFIG.CHUNK_W + lx];
+  }
+
+  setBlock(wx, wy, id) {
+    if (wy < 0 || wy >= CONFIG.CHUNK_H) return false;
+    const cx = Math.floor(wx / CONFIG.CHUNK_W);
+    const lx = ((wx % CONFIG.CHUNK_W) + CONFIG.CHUNK_W) % CONFIG.CHUNK_W;
+    this.getChunk(cx).blocks[wy * CONFIG.CHUNK_W + lx] = id;
+    return true;
+  }
+
+  findSurfaceY(wx) {
+    for (let y = 0; y < CONFIG.CHUNK_H; y++) {
+      if (BLOCK_INFO[this.getBlock(wx, y)].solid) return y;
+    }
+    return CONFIG.CHUNK_H - 1;
+  }
+}
+
+// ===========================================================================
+// === 4. Player =============================================================
+// ===========================================================================
+class Player {
+  constructor(world) {
+    this.world = world;
+    this.w = CONFIG.PLAYER_W;
+    this.h = CONFIG.PLAYER_H;
+    const spawnTileX = 8;
+    const surfaceY = world.findSurfaceY(spawnTileX);
+    this.x = spawnTileX * CONFIG.TILE + CONFIG.TILE / 2 - this.w / 2;
+    this.y = surfaceY * CONFIG.TILE - this.h - 2;
+    this.vx = 0; this.vy = 0;
+    this.onGround = false;
+    this.hp = CONFIG.HP_MAX;
+
+    // 커서 (플레이어 중심 타일 기준 오프셋)
+    this.cursorDx = 1;
+    this.cursorDy = 0;
+
+    this.slots = new Array(CONFIG.HOTBAR_SLOTS).fill(null).map(() => ({ id: B.AIR, count: 0 }));
+    this.selectedSlot = 0;
+  }
+
+  centerX() { return this.x + this.w / 2; }
+  centerY() { return this.y + this.h / 2; }
+  playerTile() { return { tx: Math.floor(this.centerX() / CONFIG.TILE), ty: Math.floor(this.centerY() / CONFIG.TILE) }; }
+  cursorTile() {
+    const p = this.playerTile();
+    return { tx: p.tx + this.cursorDx, ty: p.ty + this.cursorDy };
+  }
+
+  update(input) {
+    let dir = 0;
+    if (input.isDown('ArrowLeft') || input.isDown('KeyA')) dir -= 1;
+    if (input.isDown('ArrowRight') || input.isDown('KeyD')) dir += 1;
+    this.vx = dir * CONFIG.MOVE_SPEED;
+
+    if ((input.isDown('Space') || input.isDown('ArrowUp') || input.isDown('KeyW')) && this.onGround) {
+      this.vy = -CONFIG.JUMP_V;
+      this.onGround = false;
+    }
+
+    this.vy += CONFIG.GRAVITY;
+    if (this.vy > CONFIG.TERMINAL_V) this.vy = CONFIG.TERMINAL_V;
+
+    this.x += this.vx;
+    this.resolveCollisions('x');
+    this.y += this.vy;
+    this.onGround = false;
+    this.resolveCollisions('y');
+  }
+
+  resolveCollisions(axis) {
+    const T = CONFIG.TILE;
+    const minTx = Math.floor(this.x / T) - 1;
+    const maxTx = Math.floor((this.x + this.w) / T) + 1;
+    const minTy = Math.floor(this.y / T) - 1;
+    const maxTy = Math.floor((this.y + this.h) / T) + 1;
+
+    for (let ty = minTy; ty <= maxTy; ty++) {
+      for (let tx = minTx; tx <= maxTx; tx++) {
+        const id = this.world.getBlock(tx, ty);
+        if (!BLOCK_INFO[id].solid) continue;
+        const bx = tx * T, by = ty * T;
+        if (this.x + this.w <= bx || this.x >= bx + T) continue;
+        if (this.y + this.h <= by || this.y >= by + T) continue;
+
+        if (axis === 'x') {
+          if (this.vx > 0) this.x = bx - this.w;
+          else if (this.vx < 0) this.x = bx + T;
+          this.vx = 0;
+        } else {
+          if (this.vy > 0) { this.y = by - this.h; this.onGround = true; }
+          else if (this.vy < 0) { this.y = by + T; }
+          this.vy = 0;
+        }
+      }
+    }
+  }
+
+  addItem(id) {
+    if (id === B.AIR) return;
+    for (const s of this.slots) if (s.id === id && s.count > 0) { s.count++; return; }
+    for (const s of this.slots) if (s.count === 0) { s.id = id; s.count = 1; return; }
+  }
+
+  consumeSelected() {
+    const s = this.slots[this.selectedSlot];
+    if (s.count <= 0) return null;
+    const id = s.id;
+    s.count--;
+    if (s.count === 0) s.id = B.AIR;
+    return id;
+  }
+
+  aabb() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
+}
+
+// ===========================================================================
+// === 5. Input (키보드 전용) ================================================
+// ===========================================================================
+class Input {
+  constructor() {
+    this.keys = new Set();
+    this.justPressed = new Set();
+
+    window.addEventListener('keydown', (e) => {
+      // 게임에서 쓰는 키만 기본 동작 차단
+      const used = new Set([
+        'Space', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+        'KeyA', 'KeyD', 'KeyW', 'KeyS',
+        'KeyI', 'KeyJ', 'KeyK', 'KeyL',
+        'KeyF', 'KeyR', 'KeyQ', 'KeyE',
+        'Digit1','Digit2','Digit3','Digit4','Digit5','Digit6','Digit7','Digit8','Digit9',
+      ]);
+      if (used.has(e.code)) e.preventDefault();
+      if (!this.keys.has(e.code)) this.justPressed.add(e.code);
+      this.keys.add(e.code);
+    });
+    window.addEventListener('keyup', (e) => this.keys.delete(e.code));
+    window.addEventListener('blur', () => { this.keys.clear(); this.justPressed.clear(); });
+  }
+
+  isDown(code) { return this.keys.has(code); }
+  consumePressed(code) {
+    if (this.justPressed.has(code)) { this.justPressed.delete(code); return true; }
+    return false;
+  }
+  clearJustPressed() { this.justPressed.clear(); }
+}
+
+// ===========================================================================
+// === 6. Renderer ===========================================================
+// ===========================================================================
+class Renderer {
+  constructor(canvas, world, player) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.world = world;
+    this.player = player;
+    this.camX = player.x - canvas.width / 2;
+    this.camY = player.y - canvas.height / 2;
+    this.fps = 60;
+    this.fpsAccum = 0;
+    this.fpsFrames = 0;
+    this.fpsLast = performance.now();
+  }
+
+  updateCamera() {
+    const targetX = this.player.x + this.player.w / 2 - this.canvas.width / 2;
+    const targetY = this.player.y + this.player.h / 2 - this.canvas.height / 2;
+    this.camX += (targetX - this.camX) * CONFIG.CAM_LERP;
+    this.camY += (targetY - this.camY) * CONFIG.CAM_LERP;
+  }
+
+  render() {
+    const ctx = this.ctx;
+    const W = this.canvas.width, H = this.canvas.height;
+    const T = CONFIG.TILE;
+
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+    skyGrad.addColorStop(0, '#79c4ff');
+    skyGrad.addColorStop(1, '#bfe3ff');
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, H);
+
+    const startTx = Math.floor(this.camX / T) - 1;
+    const endTx = Math.floor((this.camX + W) / T) + 1;
+    const startTy = Math.max(0, Math.floor(this.camY / T) - 1);
+    const endTy = Math.min(CONFIG.CHUNK_H - 1, Math.floor((this.camY + H) / T) + 1);
+
+    for (let ty = startTy; ty <= endTy; ty++) {
+      for (let tx = startTx; tx <= endTx; tx++) {
+        const id = this.world.getBlock(tx, ty);
+        if (id === B.AIR) continue;
+        const info = BLOCK_INFO[id];
+        const sx = Math.floor(tx * T - this.camX);
+        const sy = Math.floor(ty * T - this.camY);
+        ctx.fillStyle = info.base;
+        ctx.fillRect(sx, sy, T, T);
+        if (this.world.getBlock(tx, ty - 1) === B.AIR) {
+          ctx.fillStyle = info.shade;
+          ctx.fillRect(sx, sy + T - 3, T, 3);
+        } else {
+          ctx.fillStyle = info.shade;
+          ctx.fillRect(sx, sy + T - 2, T, 2);
+        }
+        ctx.fillStyle = info.shade;
+        ctx.fillRect(sx + T - 2, sy, 2, T);
+      }
+    }
+
+    // 커서 외곽선
+    const c = this.player.cursorTile();
+    const csx = Math.floor(c.tx * T - this.camX);
+    const csy = Math.floor(c.ty * T - this.camY);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+    ctx.strokeRect(csx + 1, csy + 1, T - 2, T - 2);
+    // 모서리 강조
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(csx + 2, csy + 2, 4, 4);
+    ctx.fillRect(csx + T - 6, csy + 2, 4, 4);
+    ctx.fillRect(csx + 2, csy + T - 6, 4, 4);
+    ctx.fillRect(csx + T - 6, csy + T - 6, 4, 4);
+
+    // 플레이어
+    const psx = Math.floor(this.player.x - this.camX);
+    const psy = Math.floor(this.player.y - this.camY);
+    ctx.fillStyle = '#1f2a44';
+    ctx.fillRect(psx, psy, this.player.w, this.player.h);
+    ctx.fillStyle = '#e2c1a0';
+    ctx.fillRect(psx + 3, psy + 4, this.player.w - 6, 10);
+
+    this.renderHUD(ctx, W, H);
+  }
+
+  renderHUD(ctx, W, H) {
+    // HP
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(10, 10, 204, 22);
+    ctx.fillStyle = '#c83838';
+    const hpW = Math.floor(200 * (this.player.hp / CONFIG.HP_MAX));
+    ctx.fillRect(12, 12, hpW, 18);
+    ctx.fillStyle = '#fff';
+    ctx.font = '13px sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.fillText(`HP ${this.player.hp}/${CONFIG.HP_MAX}`, 18, 21);
+
+    // 우상단 FPS + 좌표
+    const tx = Math.floor(this.player.centerX() / CONFIG.TILE);
+    const ty = Math.floor(this.player.centerY() / CONFIG.TILE);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(W - 200, 10, 190, 62);
+    ctx.fillStyle = '#fff';
+    ctx.font = '13px monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`FPS ${this.fps.toFixed(0)}`, W - 18, 16);
+    ctx.fillText(`x=${tx} y=${ty}`, W - 18, 34);
+    ctx.fillText(`cur ${this.player.cursorDx},${this.player.cursorDy}`, W - 18, 52);
+    ctx.textAlign = 'left';
+
+    // 핫바
+    const slotSize = 48, pad = 4;
+    const totalW = CONFIG.HOTBAR_SLOTS * slotSize + (CONFIG.HOTBAR_SLOTS - 1) * pad;
+    const baseX = Math.floor((W - totalW) / 2);
+    const baseY = H - slotSize - 14;
+    for (let i = 0; i < CONFIG.HOTBAR_SLOTS; i++) {
+      const x = baseX + i * (slotSize + pad);
+      const y = baseY;
+      const sel = (i === this.player.selectedSlot);
+      ctx.fillStyle = sel ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.5)';
+      ctx.fillRect(x - 2, y - 2, slotSize + 4, slotSize + 4);
+      ctx.fillStyle = 'rgba(40,40,40,0.85)';
+      ctx.fillRect(x, y, slotSize, slotSize);
+
+      const slot = this.player.slots[i];
+      if (slot.count > 0 && slot.id !== B.AIR) {
+        const info = BLOCK_INFO[slot.id];
+        ctx.fillStyle = info.base;
+        ctx.fillRect(x + 8, y + 8, slotSize - 16, slotSize - 16);
+        ctx.fillStyle = info.shade;
+        ctx.fillRect(x + 8, y + slotSize - 12, slotSize - 16, 4);
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 14px monospace';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(String(slot.count), x + slotSize - 4, y + slotSize - 2);
+        ctx.textAlign = 'left';
+      }
+      ctx.fillStyle = sel ? '#000' : 'rgba(255,255,255,0.6)';
+      ctx.font = 'bold 11px monospace';
+      ctx.textBaseline = 'top';
+      ctx.fillText(String(i + 1), x + 4, y + 3);
+    }
+
+    // 키 도움말 (좌하단)
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(10, H - 116, 280, 100);
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px monospace';
+    ctx.textBaseline = 'top';
+    const helpLines = [
+      '이동 : A/D · ←/→',
+      '점프 : Space · W · ↑',
+      '커서 : I(↑) J(←) K(↓) L(→)',
+      '채굴 : F     설치 : R',
+      '슬롯 : 1~9   ◀ Q   E ▶',
+    ];
+    for (let i = 0; i < helpLines.length; i++) {
+      ctx.fillText(helpLines[i], 18, H - 110 + i * 18);
+    }
+  }
+
+  tickFPS(now) {
+    this.fpsFrames++;
+    this.fpsAccum += now - this.fpsLast;
+    this.fpsLast = now;
+    if (this.fpsAccum >= 500) {
+      this.fps = (this.fpsFrames * 1000) / this.fpsAccum;
+      this.fpsFrames = 0; this.fpsAccum = 0;
+    }
+  }
+}
+
+// ===========================================================================
+// === 7. Game loop ==========================================================
+// ===========================================================================
+const canvas = document.getElementById('game');
+function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+resize();
+window.addEventListener('resize', resize);
+
+const world = new World(CONFIG.WORLD_SEED);
+const player = new Player(world);
+const input = new Input();
+const renderer = new Renderer(canvas, world, player);
+
+let cursorTimer = 0;
+let actionCooldown = 0;
+
+function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+function updateCursor(dt) {
+  cursorTimer -= dt;
+  let dx = 0, dy = 0;
+  if (input.isDown('KeyI')) dy -= 1;
+  if (input.isDown('KeyK')) dy += 1;
+  if (input.isDown('KeyJ')) dx -= 1;
+  if (input.isDown('KeyL')) dx += 1;
+  if (dx === 0 && dy === 0) { cursorTimer = 0; return; }
+  if (cursorTimer > 0) return;
+  player.cursorDx = clamp(player.cursorDx + dx, -CONFIG.REACH_TILES, CONFIG.REACH_TILES);
+  player.cursorDy = clamp(player.cursorDy + dy, -CONFIG.REACH_TILES, CONFIG.REACH_TILES);
+  cursorTimer = CONFIG.CURSOR_REPEAT_MS;
+}
+
+function updateSlotKeys() {
+  // 1~9
+  for (let i = 1; i <= 9; i++) {
+    if (input.consumePressed('Digit' + i)) player.selectedSlot = i - 1;
+  }
+  if (input.consumePressed('KeyQ')) {
+    player.selectedSlot = (player.selectedSlot - 1 + CONFIG.HOTBAR_SLOTS) % CONFIG.HOTBAR_SLOTS;
+  }
+  if (input.consumePressed('KeyE')) {
+    player.selectedSlot = (player.selectedSlot + 1) % CONFIG.HOTBAR_SLOTS;
+  }
+}
+
+function targetTile() {
+  const p = player.playerTile();
+  return { tx: p.tx + player.cursorDx, ty: p.ty + player.cursorDy };
+}
+
+function tryMine() {
+  const t = targetTile();
+  const id = world.getBlock(t.tx, t.ty);
+  if (id === B.AIR) return;
+  world.setBlock(t.tx, t.ty, B.AIR);
+  player.addItem(id);
+}
+
+function tryPlace() {
+  const t = targetTile();
+  if (world.getBlock(t.tx, t.ty) !== B.AIR) return;
+  const T = CONFIG.TILE;
+  const bx = t.tx * T, by = t.ty * T;
+  const p = player.aabb();
+  if (!(p.x + p.w <= bx || p.x >= bx + T || p.y + p.h <= by || p.y >= by + T)) return;
+  const id = player.consumeSelected();
+  if (id === null || id === B.AIR) return;
+  world.setBlock(t.tx, t.ty, id);
+}
+
+function updateActions(dt) {
+  actionCooldown -= dt;
+  if (actionCooldown > 0) { input.consumePressed('KeyF'); input.consumePressed('KeyR'); return; }
+  if (input.isDown('KeyF')) {
+    tryMine(); actionCooldown = CONFIG.ACTION_COOLDOWN_MINE_MS;
+    input.consumePressed('KeyF');
+  } else if (input.isDown('KeyR')) {
+    tryPlace(); actionCooldown = CONFIG.ACTION_COOLDOWN_PLACE_MS;
+    input.consumePressed('KeyR');
+  }
+}
+
+let lastT = performance.now();
+function loop(now) {
+  const dt = Math.min(33, now - lastT);
+  lastT = now;
+
+  player.update(input);
+  updateCursor(dt);
+  updateSlotKeys();
+  updateActions(dt);
+  renderer.updateCamera();
+  renderer.tickFPS(now);
+  renderer.render();
+
+  // 다음 프레임을 위해 잔여 justPressed 정리(같은 프레임 내 미사용분)
+  input.clearJustPressed();
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
