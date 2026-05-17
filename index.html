@@ -56,12 +56,6 @@ const CONFIG = {
   CAM_LERP: 0.15,
   HP_MAX: 100,
 
-  // 밤낮 사이클 (한 사이클 4분)
-  DAY_LENGTH_MS: 4 * 60 * 1000,
-  NIGHT_DARKNESS: 0.78,  // 밤 최대 어둠 (0..1)
-  PLAYER_LIGHT_RADIUS: 200,
-  TORCH_LIGHT_RADIUS: 140,
-
   // 키 반복 간격 (ms)
   CURSOR_REPEAT_MS: 110,
   ACTION_COOLDOWN_MINE_MS: 170,
@@ -430,48 +424,13 @@ class Input {
 // ===========================================================================
 // === 6. Renderer ===========================================================
 // ===========================================================================
-function lerp(a, b, t) { return a + (b - a) * t; }
-function hexToRgb(h) {
-  const v = parseInt(h.slice(1), 16);
-  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
-}
-function lerpHex(a, b, t) {
-  const A = hexToRgb(a), B = hexToRgb(b);
-  const r = Math.round(lerp(A[0], B[0], t));
-  const g = Math.round(lerp(A[1], B[1], t));
-  const bl = Math.round(lerp(A[2], B[2], t));
-  return `rgb(${r},${g},${bl})`;
-}
-
-// worldTime → { phase, darkness, skyTop, skyBot }
-function getDaylight(worldTime) {
-  const t = (worldTime % CONFIG.DAY_LENGTH_MS) / CONFIG.DAY_LENGTH_MS; // 0..1
-  // 정오 = 0.25에서 가장 밝음, 한밤 = 0.75에서 가장 어둠
-  const sun = Math.cos(2 * Math.PI * (t - 0.25)); // -1..1
-  // 정오 부근 평탄하게: light에 약간 클램프해서 한낮은 어둠 0
-  const lightRaw = (sun + 1) / 2; // 0..1
-  const light = Math.min(1, lightRaw * 1.15); // 살짝 부풀려 한낮을 길게
-  const darkness = 1 - light;
-  let phase;
-  if (t < 0.12) phase = '새벽';
-  else if (t < 0.20) phase = '아침';
-  else if (t < 0.45) phase = '한낮';
-  else if (t < 0.55) phase = '저녁';
-  else if (t < 0.92) phase = '밤';
-  else phase = '새벽';
-  const skyTop = lerpHex('#0a0e22', '#79c4ff', light);
-  const skyBot = lerpHex('#1c2440', '#bfe3ff', light);
-  return { t, phase, darkness, skyTop, skyBot, light };
-}
-
 class Renderer {
-  constructor(canvas, world, player, getCrafting, getWorldTime) {
+  constructor(canvas, world, player, getCrafting) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.world = world;
     this.player = player;
     this.getCrafting = getCrafting || (() => ({ open: false }));
-    this.getWorldTime = getWorldTime || (() => 0);
     this.camX = player.x - canvas.width / 2;
     this.camY = player.y - canvas.height / 2;
     this.fps = 60;
@@ -492,10 +451,9 @@ class Renderer {
     const W = this.canvas.width, H = this.canvas.height;
     const T = CONFIG.TILE;
 
-    const daylight = getDaylight(this.getWorldTime());
     const skyGrad = ctx.createLinearGradient(0, 0, 0, H);
-    skyGrad.addColorStop(0, daylight.skyTop);
-    skyGrad.addColorStop(1, daylight.skyBot);
+    skyGrad.addColorStop(0, '#79c4ff');
+    skyGrad.addColorStop(1, '#bfe3ff');
     ctx.fillStyle = skyGrad;
     ctx.fillRect(0, 0, W, H);
 
@@ -567,38 +525,7 @@ class Renderer {
     ctx.fillStyle = '#e2c1a0';
     ctx.fillRect(psx + 3, psy + 4, this.player.w - 6, 10);
 
-    // 어둠 오버레이 (밤일수록 진해짐)
-    const darkAlpha = daylight.darkness * CONFIG.NIGHT_DARKNESS;
-    if (darkAlpha > 0.02) {
-      // 1) 전체 어둠
-      ctx.save();
-      ctx.fillStyle = `rgba(5,8,20,${darkAlpha})`;
-      ctx.fillRect(0, 0, W, H);
-      // 2) 플레이어 주변 + TORCH 주변에 라이트 컷아웃
-      ctx.globalCompositeOperation = 'destination-out';
-      const drawLight = (lx, ly, radius) => {
-        const g = ctx.createRadialGradient(lx, ly, 0, lx, ly, radius);
-        g.addColorStop(0,   'rgba(0,0,0,1)');
-        g.addColorStop(0.35,'rgba(0,0,0,1)');
-        g.addColorStop(1,   'rgba(0,0,0,0)');
-        ctx.fillStyle = g;
-        ctx.fillRect(lx - radius, ly - radius, radius * 2, radius * 2);
-      };
-      drawLight(psx + this.player.w / 2, psy + this.player.h / 2, CONFIG.PLAYER_LIGHT_RADIUS);
-      // 보이는 영역의 TORCH
-      for (let ty = startTy; ty <= endTy; ty++) {
-        for (let tx = startTx; tx <= endTx; tx++) {
-          if (this.world.getBlock(tx, ty) === B.TORCH) {
-            const lx = tx * T - this.camX + T / 2;
-            const ly = ty * T - this.camY + T / 2;
-            drawLight(lx, ly, CONFIG.TORCH_LIGHT_RADIUS);
-          }
-        }
-      }
-      ctx.restore();
-    }
-
-    this.renderHUD(ctx, W, H, daylight);
+    this.renderHUD(ctx, W, H);
     if (this.getCrafting().open) this.renderCraftingPanel(ctx, W, H);
   }
 
@@ -658,7 +585,7 @@ class Renderer {
     }
   }
 
-  renderHUD(ctx, W, H, daylight) {
+  renderHUD(ctx, W, H) {
     // HP
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
     ctx.fillRect(10, 10, 204, 22);
@@ -676,14 +603,13 @@ class Renderer {
     const ty = Math.floor(this.player.centerY() / CONFIG.TILE);
     ctx.textAlign = 'right';
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    ctx.fillRect(W - 200, 10, 190, 80);
+    ctx.fillRect(W - 200, 10, 190, 62);
     ctx.fillStyle = '#fff';
     ctx.font = '13px monospace';
     ctx.textBaseline = 'top';
     ctx.fillText(`FPS ${this.fps.toFixed(0)}`, W - 18, 16);
     ctx.fillText(`x=${tx} y=${ty}`, W - 18, 34);
     ctx.fillText(`cur ${this.player.cursorDx},${this.player.cursorDy}`, W - 18, 52);
-    if (daylight) ctx.fillText(`${daylight.phase}`, W - 18, 70);
     ctx.textAlign = 'left';
 
     // 핫바
@@ -769,10 +695,9 @@ const player = new Player(world);
 const input = new Input();
 
 // 게임 상태
-let worldTime = CONFIG.DAY_LENGTH_MS * 0.25; // 아침에서 시작
 let crafting = { open: false, selected: 0, message: '', messageTimer: 0 };
 
-const renderer = new Renderer(canvas, world, player, () => crafting, () => worldTime);
+const renderer = new Renderer(canvas, world, player, () => crafting);
 
 let cursorTimer = 0;
 let actionCooldown = 0;
@@ -908,8 +833,6 @@ let lastT = performance.now();
 function loop(now) {
   const dt = Math.min(33, now - lastT);
   lastT = now;
-
-  worldTime += dt;
 
   // 크래프팅 패널 열려 있으면 플레이어 이동/액션 멈춤
   if (!crafting.open) {
