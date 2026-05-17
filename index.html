@@ -27,6 +27,22 @@ const CONFIG = {
   SURFACE_AMPL: 12,
   SURFACE_FREQ: 0.06,
 
+  // 동굴 (2D 노이즈 카빙)
+  CAVE_FREQ: 0.09,
+  CAVE_THRESHOLD: 0.58,  // 이 값 이상이면 AIR
+  CAVE_MIN_DEPTH: 8,     // 표면에서 이만큼 아래부터 동굴 생성
+
+  // 광물 (깊이별 등장 확률)
+  COAL_MIN_DEPTH: 5,   COAL_CHANCE: 0.045,
+  IRON_MIN_DEPTH: 15,  IRON_CHANCE: 0.022,
+  DIAMOND_MIN_DEPTH: 50, DIAMOND_CHANCE: 0.005,
+
+  // 나무
+  TREE_CHANCE: 0.10,   // 컬럼당
+  TREE_MIN_H: 3,
+  TREE_MAX_H: 5,
+  TREE_MIN_GAP: 3,     // 같은 청크 내 나무 간 최소 간격
+
   PLAYER_W: 22,
   PLAYER_H: 44,
   MOVE_SPEED: 4.5,
@@ -46,13 +62,24 @@ const CONFIG = {
   ACTION_COOLDOWN_PLACE_MS: 200,
 };
 
-const B = { AIR: 0, GRASS: 1, DIRT: 2, STONE: 3 };
+const B = {
+  AIR: 0, GRASS: 1, DIRT: 2, STONE: 3,
+  COAL: 4, IRON: 5, DIAMOND: 6,
+  LOG: 7, LEAVES: 8,
+};
 
+// ore: stone 색 위에 oreColor로 점 4개 그림
+const STONE_BASE = '#888a8d', STONE_SHADE = '#5a5c5f';
 const BLOCK_INFO = {
-  [B.AIR]:   { name: 'air',   base: null,      shade: null,      solid: false },
-  [B.GRASS]: { name: 'grass', base: '#5fbf3a', shade: '#3f8a25', solid: true  },
-  [B.DIRT]:  { name: 'dirt',  base: '#8a5a32', shade: '#5e3c1f', solid: true  },
-  [B.STONE]: { name: 'stone', base: '#888a8d', shade: '#5a5c5f', solid: true  },
+  [B.AIR]:     { name: 'air',     base: null,       shade: null,       solid: false },
+  [B.GRASS]:   { name: 'grass',   base: '#5fbf3a',  shade: '#3f8a25',  solid: true  },
+  [B.DIRT]:    { name: 'dirt',    base: '#8a5a32',  shade: '#5e3c1f',  solid: true  },
+  [B.STONE]:   { name: 'stone',   base: STONE_BASE, shade: STONE_SHADE, solid: true },
+  [B.COAL]:    { name: 'coal',    base: STONE_BASE, shade: STONE_SHADE, solid: true, ore: '#1d1d1d' },
+  [B.IRON]:    { name: 'iron',    base: STONE_BASE, shade: STONE_SHADE, solid: true, ore: '#d6a679' },
+  [B.DIAMOND]: { name: 'diamond', base: STONE_BASE, shade: STONE_SHADE, solid: true, ore: '#5fe3ee' },
+  [B.LOG]:     { name: 'log',     base: '#6b3e1e',  shade: '#3f2410',  solid: true  },
+  [B.LEAVES]:  { name: 'leaves',  base: '#2e8a2a',  shade: '#1d5a1d',  solid: true  },
 };
 
 // ===========================================================================
@@ -73,6 +100,35 @@ function fbm1D(x, seed, freq, octaves) {
   let sum = 0, amp = 1, f = freq, norm = 0;
   for (let o = 0; o < octaves; o++) {
     sum += smoothNoise1D(x, seed + o * 101, f) * amp;
+    norm += amp; amp *= 0.5; f *= 2;
+  }
+  return sum / norm;
+}
+
+function hash2(x, y, seed) {
+  let h = (x * 374761393) ^ (y * 1103515245) ^ (seed * 668265263);
+  h = (h ^ (h >>> 13)) * 1274126177;
+  h = h ^ (h >>> 16);
+  return ((h >>> 0) % 100000) / 100000;
+}
+
+function smoothNoise2D(x, y, seed, freq) {
+  const sx = x * freq, sy = y * freq;
+  const ix = Math.floor(sx), iy = Math.floor(sy);
+  const tx = sx - ix, ty = sy - iy;
+  const a = hash2(ix,     iy,     seed);
+  const b = hash2(ix + 1, iy,     seed);
+  const c = hash2(ix,     iy + 1, seed);
+  const d = hash2(ix + 1, iy + 1, seed);
+  const x1 = cerp(a, b, tx);
+  const x2 = cerp(c, d, tx);
+  return cerp(x1, x2, ty);
+}
+
+function fbm2D(x, y, seed, freq, octaves) {
+  let sum = 0, amp = 1, f = freq, norm = 0;
+  for (let o = 0; o < octaves; o++) {
+    sum += smoothNoise2D(x, y, seed + o * 211, f) * amp;
     norm += amp; amp *= 0.5; f *= 2;
   }
   return sum / norm;
@@ -100,10 +156,15 @@ class World {
   generateChunk(cx) {
     const c = new Chunk(cx);
     const W = CONFIG.CHUNK_W, H = CONFIG.CHUNK_H;
+    const seed = this.seed;
+    const surfaces = new Array(W);
+
+    // 1) 기본 지형: grass / dirt / stone
     for (let lx = 0; lx < W; lx++) {
       const wx = cx * W + lx;
-      const n = fbm1D(wx, this.seed, CONFIG.SURFACE_FREQ, 3);
+      const n = fbm1D(wx, seed, CONFIG.SURFACE_FREQ, 3);
       const surface = Math.floor(CONFIG.SURFACE_BASE + (n - 0.5) * 2 * CONFIG.SURFACE_AMPL);
+      surfaces[lx] = surface;
       for (let y = 0; y < H; y++) {
         let id = B.AIR;
         if (y === surface) id = B.GRASS;
@@ -112,6 +173,75 @@ class World {
         c.blocks[y * W + lx] = id;
       }
     }
+
+    // 2) 동굴 카빙: stone 영역에 2D 노이즈 임계값 이상이면 AIR
+    for (let lx = 0; lx < W; lx++) {
+      const wx = cx * W + lx;
+      const surface = surfaces[lx];
+      for (let y = surface + CONFIG.CAVE_MIN_DEPTH; y < H; y++) {
+        if (c.blocks[y * W + lx] !== B.STONE) continue;
+        const cv = fbm2D(wx, y, seed + 17, CONFIG.CAVE_FREQ, 2);
+        if (cv > CONFIG.CAVE_THRESHOLD) c.blocks[y * W + lx] = B.AIR;
+      }
+    }
+
+    // 3) 광물 스폰: 남은 STONE 칸에 깊이별 확률로 교체
+    for (let lx = 0; lx < W; lx++) {
+      const wx = cx * W + lx;
+      const surface = surfaces[lx];
+      for (let y = surface + 1; y < H; y++) {
+        if (c.blocks[y * W + lx] !== B.STONE) continue;
+        const depth = y - surface;
+        const r = hash2(wx, y, seed + 91);
+        if (depth >= CONFIG.DIAMOND_MIN_DEPTH && r < CONFIG.DIAMOND_CHANCE) {
+          c.blocks[y * W + lx] = B.DIAMOND;
+        } else if (depth >= CONFIG.IRON_MIN_DEPTH && r < CONFIG.IRON_CHANCE) {
+          c.blocks[y * W + lx] = B.IRON;
+        } else if (depth >= CONFIG.COAL_MIN_DEPTH && r < CONFIG.COAL_CHANCE) {
+          c.blocks[y * W + lx] = B.COAL;
+        }
+      }
+    }
+
+    // 4) 나무: 청크 안쪽 (lx 2..W-3) 컬럼에서만 (잎이 경계 밖으로 안 나가게)
+    let lastTreeLx = -999;
+    for (let lx = 2; lx < W - 2; lx++) {
+      if (lx - lastTreeLx < CONFIG.TREE_MIN_GAP) continue;
+      const wx = cx * W + lx;
+      const r1 = hash1(wx, seed + 31);
+      if (r1 >= CONFIG.TREE_CHANCE) continue;
+      const surface = surfaces[lx];
+      // 표면이 grass여야 (방금 그렇게 만들었으므로 항상 true지만 확인)
+      if (c.blocks[surface * W + lx] !== B.GRASS) continue;
+      const r2 = hash1(wx, seed + 37);
+      const h = CONFIG.TREE_MIN_H + Math.floor(r2 * (CONFIG.TREE_MAX_H - CONFIG.TREE_MIN_H + 1));
+      // 통나무
+      for (let i = 1; i <= h; i++) {
+        const ty = surface - i;
+        if (ty < 0) break;
+        c.blocks[ty * W + lx] = B.LOG;
+      }
+      // 잎: 통나무 상단 주변 (5x3 영역 + 모서리 제외 + 꼭대기 1칸)
+      const topY = surface - h;
+      for (let dy = -2; dy <= 0; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          if (Math.abs(dx) === 2 && dy === -2) continue; // 모서리 컷
+          if (dx === 0 && dy === 0) continue; // 통나무 끝부분 보존? 아니, 잎으로 덮어도 됨
+          const ty = topY + dy;
+          const tlx = lx + dx;
+          if (tlx < 0 || tlx >= W || ty < 0) continue;
+          if (c.blocks[ty * W + tlx] === B.AIR) {
+            c.blocks[ty * W + tlx] = B.LEAVES;
+          }
+        }
+      }
+      // 꼭대기 1칸 위 잎
+      if (topY - 1 >= 0 && c.blocks[(topY - 1) * W + lx] === B.AIR) {
+        c.blocks[(topY - 1) * W + lx] = B.LEAVES;
+      }
+      lastTreeLx = lx;
+    }
+
     return c;
   }
 
@@ -131,8 +261,10 @@ class World {
   }
 
   findSurfaceY(wx) {
+    // GRASS / DIRT / STONE 같은 '땅'을 찾을 때까지 (LOG/LEAVES는 무시)
     for (let y = 0; y < CONFIG.CHUNK_H; y++) {
-      if (BLOCK_INFO[this.getBlock(wx, y)].solid) return y;
+      const id = this.getBlock(wx, y);
+      if (id === B.GRASS || id === B.DIRT || id === B.STONE) return y;
     }
     return CONFIG.CHUNK_H - 1;
   }
@@ -328,6 +460,15 @@ class Renderer {
         }
         ctx.fillStyle = info.shade;
         ctx.fillRect(sx + T - 2, sy, 2, T);
+        // 광물 점박이
+        if (info.ore) {
+          ctx.fillStyle = info.ore;
+          const s = 5;
+          ctx.fillRect(sx + 6,        sy + 6,        s, s);
+          ctx.fillRect(sx + T - 6 - s, sy + 8,        s, s);
+          ctx.fillRect(sx + 8,        sy + T - 6 - s, s, s);
+          ctx.fillRect(sx + T - 8 - s, sy + T - 8 - s, s, s);
+        }
       }
     }
 
@@ -404,6 +545,12 @@ class Renderer {
         ctx.fillRect(x + 8, y + 8, slotSize - 16, slotSize - 16);
         ctx.fillStyle = info.shade;
         ctx.fillRect(x + 8, y + slotSize - 12, slotSize - 16, 4);
+        if (info.ore) {
+          ctx.fillStyle = info.ore;
+          ctx.fillRect(x + 12, y + 12, 5, 5);
+          ctx.fillRect(x + slotSize - 17, y + 16, 5, 5);
+          ctx.fillRect(x + 16, y + slotSize - 18, 5, 5);
+        }
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 14px monospace';
         ctx.textAlign = 'right';
