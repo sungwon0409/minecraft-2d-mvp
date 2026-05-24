@@ -35,7 +35,10 @@ const CONFIG = {
   // 광물 (깊이별 등장 확률)
   COAL_MIN_DEPTH: 5,   COAL_CHANCE: 0.045,
   IRON_MIN_DEPTH: 15,  IRON_CHANCE: 0.022,
-  DIAMOND_MIN_DEPTH: 50, DIAMOND_CHANCE: 0.005,
+  AMETHYST_MIN_DEPTH: 25, AMETHYST_CHANCE: 0.010,
+  EMERALD_MIN_DEPTH: 30,  EMERALD_CHANCE: 0.008,
+  RUBY_MIN_DEPTH: 40,     RUBY_CHANCE: 0.007,
+  DIAMOND_MIN_DEPTH: 50,  DIAMOND_CHANCE: 0.005,
 
   // 나무
   TREE_CHANCE: 0.10,   // 컬럼당
@@ -68,6 +71,9 @@ const B = {
   LOG: 7, LEAVES: 8,
   // 크래프팅 산출물
   PLANK: 9, BRICK: 10, TORCH: 11,
+  DOOR: 12, STAIRS: 13, SWORD: 14,
+  // 추가 보석류
+  RUBY: 15, AMETHYST: 16, EMERALD: 17,
 };
 
 // ore: stone 색 위에 oreColor로 점 4개 그림
@@ -84,14 +90,24 @@ const BLOCK_INFO = {
   [B.LEAVES]:  { name: 'leaves',  base: '#2e8a2a',  shade: '#1d5a1d',  solid: true  },
   [B.PLANK]:   { name: 'plank',   base: '#c79b66',  shade: '#8a6a3f',  solid: true  },
   [B.BRICK]:   { name: 'brick',   base: '#b8b8b8',  shade: '#6f6f6f',  solid: true  },
-  [B.TORCH]:   { name: 'torch',   base: '#ffd366',  shade: '#a87328',  solid: false, light: true },
+  [B.TORCH]:   { name: 'torch',   base: '#ffd366',  shade: '#a87328',  solid: false },
+  [B.DOOR]:    { name: 'door',    base: '#7a4a1f',  shade: '#3f2410',  solid: false },
+  [B.STAIRS]:  { name: 'stairs',  base: '#c79b66',  shade: '#8a6a3f',  solid: true  },
+  [B.SWORD]:   { name: 'sword',   base: '#d8d8d8',  shade: '#5a5c5f',  solid: false, placeable: false },
+  // 보석은 stone 베이스 + ore 색
+  [B.RUBY]:    { name: 'ruby',    base: STONE_BASE, shade: STONE_SHADE, solid: true, ore: '#e23a3a' },
+  [B.AMETHYST]:{ name: 'amethyst',base: STONE_BASE, shade: STONE_SHADE, solid: true, ore: '#b06ee6' },
+  [B.EMERALD]: { name: 'emerald', base: STONE_BASE, shade: STONE_SHADE, solid: true, ore: '#3ed87a' },
 };
 
 // 크래프팅 레시피 (재료 → 산출물)
 const RECIPES = [
-  { name: 'Plank',  in: { [B.LOG]: 1 },                out: { id: B.PLANK, count: 4 } },
-  { name: 'Brick',  in: { [B.STONE]: 4 },              out: { id: B.BRICK, count: 4 } },
-  { name: 'Torch',  in: { [B.COAL]: 1, [B.PLANK]: 1 }, out: { id: B.TORCH, count: 4 } },
+  { name: 'Plank',    in: { [B.LOG]: 1 },                out: { id: B.PLANK,  count: 4 } },
+  { name: 'Brick',    in: { [B.STONE]: 4 },              out: { id: B.BRICK,  count: 4 } },
+  { name: 'Torch',    in: { [B.COAL]: 1, [B.PLANK]: 1 }, out: { id: B.TORCH,  count: 4 } },
+  { name: 'Stairs',   in: { [B.PLANK]: 3 },              out: { id: B.STAIRS, count: 4 } },
+  { name: 'Door',     in: { [B.PLANK]: 6 },              out: { id: B.DOOR,   count: 1 } },
+  { name: 'Sword',    in: { [B.PLANK]: 1, [B.IRON]: 2 }, out: { id: B.SWORD,  count: 1 } },
 ];
 
 // ===========================================================================
@@ -207,6 +223,12 @@ class World {
         const r = hash2(wx, y, seed + 91);
         if (depth >= CONFIG.DIAMOND_MIN_DEPTH && r < CONFIG.DIAMOND_CHANCE) {
           c.blocks[y * W + lx] = B.DIAMOND;
+        } else if (depth >= CONFIG.RUBY_MIN_DEPTH && r < CONFIG.RUBY_CHANCE) {
+          c.blocks[y * W + lx] = B.RUBY;
+        } else if (depth >= CONFIG.EMERALD_MIN_DEPTH && r < CONFIG.EMERALD_CHANCE) {
+          c.blocks[y * W + lx] = B.EMERALD;
+        } else if (depth >= CONFIG.AMETHYST_MIN_DEPTH && r < CONFIG.AMETHYST_CHANCE) {
+          c.blocks[y * W + lx] = B.AMETHYST;
         } else if (depth >= CONFIG.IRON_MIN_DEPTH && r < CONFIG.IRON_CHANCE) {
           c.blocks[y * W + lx] = B.IRON;
         } else if (depth >= CONFIG.COAL_MIN_DEPTH && r < CONFIG.COAL_CHANCE) {
@@ -470,14 +492,43 @@ class Renderer {
         const sx = Math.floor(tx * T - this.camX);
         const sy = Math.floor(ty * T - this.camY);
         if (id === B.TORCH) {
-          // 막대
           ctx.fillStyle = '#6b3e1e';
           ctx.fillRect(sx + T / 2 - 2, sy + 12, 4, T - 14);
-          // 불꽃
           ctx.fillStyle = '#ffd366';
           ctx.fillRect(sx + T / 2 - 4, sy + 6, 8, 10);
           ctx.fillStyle = '#ff8a3c';
           ctx.fillRect(sx + T / 2 - 2, sy + 9, 4, 5);
+          continue;
+        }
+        if (id === B.DOOR) {
+          // 문 프레임 + 손잡이
+          ctx.fillStyle = info.base;
+          ctx.fillRect(sx + 4, sy, T - 8, T);
+          ctx.fillStyle = info.shade;
+          ctx.fillRect(sx + 4, sy, 2, T);
+          ctx.fillRect(sx + T - 6, sy, 2, T);
+          ctx.fillRect(sx + 4, sy + T / 2, T - 8, 2);
+          ctx.fillStyle = '#ffd366';
+          ctx.fillRect(sx + T - 10, sy + T / 2 + 4, 3, 3);
+          continue;
+        }
+        if (id === B.STAIRS) {
+          // 우상→좌하 계단 모양 (위 절반은 우측만, 아래 절반은 전체)
+          ctx.fillStyle = info.base;
+          ctx.fillRect(sx, sy + T / 2, T, T / 2);
+          ctx.fillRect(sx + T / 2, sy, T / 2, T / 2);
+          ctx.fillStyle = info.shade;
+          ctx.fillRect(sx, sy + T - 2, T, 2);
+          ctx.fillRect(sx + T / 2, sy + T / 2 - 2, T / 2, 2);
+          continue;
+        }
+        if (id === B.SWORD) {
+          // 검 (블록에 놓일 일 거의 없음 — 보호 차원)
+          ctx.fillStyle = '#d8d8d8';
+          ctx.fillRect(sx + T / 2 - 2, sy + 4, 4, 18);
+          ctx.fillStyle = '#6b3e1e';
+          ctx.fillRect(sx + T / 2 - 5, sy + 22, 10, 3);
+          ctx.fillRect(sx + T / 2 - 2, sy + 25, 4, 5);
           continue;
         }
         ctx.fillStyle = info.base;
@@ -629,10 +680,35 @@ class Renderer {
       const slot = this.player.slots[i];
       if (slot.count > 0 && slot.id !== B.AIR) {
         const info = BLOCK_INFO[slot.id];
-        ctx.fillStyle = info.base;
-        ctx.fillRect(x + 8, y + 8, slotSize - 16, slotSize - 16);
-        ctx.fillStyle = info.shade;
-        ctx.fillRect(x + 8, y + slotSize - 12, slotSize - 16, 4);
+        const ix = x + 8, iy = y + 8, isz = slotSize - 16;
+        if (slot.id === B.SWORD) {
+          ctx.fillStyle = '#d8d8d8';
+          ctx.fillRect(ix + isz / 2 - 2, iy + 2, 4, isz - 12);
+          ctx.fillStyle = '#6b3e1e';
+          ctx.fillRect(ix + isz / 2 - 6, iy + isz - 12, 12, 3);
+          ctx.fillRect(ix + isz / 2 - 2, iy + isz - 9, 4, 7);
+        } else if (slot.id === B.DOOR) {
+          ctx.fillStyle = info.base;
+          ctx.fillRect(ix + 4, iy, isz - 8, isz);
+          ctx.fillStyle = info.shade;
+          ctx.fillRect(ix + 4, iy + isz / 2, isz - 8, 2);
+          ctx.fillStyle = '#ffd366';
+          ctx.fillRect(ix + isz - 8, iy + isz / 2 + 3, 2, 2);
+        } else if (slot.id === B.STAIRS) {
+          ctx.fillStyle = info.base;
+          ctx.fillRect(ix, iy + isz / 2, isz, isz / 2);
+          ctx.fillRect(ix + isz / 2, iy, isz / 2, isz / 2);
+        } else if (slot.id === B.TORCH) {
+          ctx.fillStyle = '#6b3e1e';
+          ctx.fillRect(ix + isz / 2 - 2, iy + isz / 2 - 2, 4, isz / 2 + 2);
+          ctx.fillStyle = '#ffd366';
+          ctx.fillRect(ix + isz / 2 - 4, iy + 2, 8, 10);
+        } else {
+          ctx.fillStyle = info.base;
+          ctx.fillRect(ix, iy, isz, isz);
+          ctx.fillStyle = info.shade;
+          ctx.fillRect(ix, iy + isz - 4, isz, 4);
+        }
         if (info.ore) {
           ctx.fillStyle = info.ore;
           ctx.fillRect(x + 12, y + 12, 5, 5);
@@ -747,10 +823,16 @@ function tryMine() {
 function tryPlace() {
   const t = targetTile();
   if (world.getBlock(t.tx, t.ty) !== B.AIR) return;
+  // 선택 슬롯이 placeable=false 면 설치 무시 (검 같은 도구)
+  const sel = player.slots[player.selectedSlot];
+  if (sel.count <= 0 || sel.id === B.AIR) return;
+  const selInfo = BLOCK_INFO[sel.id];
+  if (selInfo.placeable === false) return;
   const T = CONFIG.TILE;
   const bx = t.tx * T, by = t.ty * T;
   const p = player.aabb();
-  if (!(p.x + p.w <= bx || p.x >= bx + T || p.y + p.h <= by || p.y >= by + T)) return;
+  // 솔리드 블록만 플레이어와 겹침 체크
+  if (selInfo.solid && !(p.x + p.w <= bx || p.x >= bx + T || p.y + p.h <= by || p.y >= by + T)) return;
   const id = player.consumeSelected();
   if (id === null || id === B.AIR) return;
   world.setBlock(t.tx, t.ty, id);
