@@ -33,13 +33,13 @@ const CONFIG = {
   CAVE_MIN_DEPTH: 8,     // 표면에서 이만큼 아래부터 동굴 생성
 
   // 광물 (깊이별 등장 확률)
-  // 광물 — 전부 얕고 흔하게 (석탄 수준)
-  COAL_MIN_DEPTH: 5,     COAL_CHANCE: 0.045,
-  IRON_MIN_DEPTH: 5,     IRON_CHANCE: 0.040,
-  AMETHYST_MIN_DEPTH: 5, AMETHYST_CHANCE: 0.040,
-  EMERALD_MIN_DEPTH: 5,  EMERALD_CHANCE: 0.035,
-  RUBY_MIN_DEPTH: 5,     RUBY_CHANCE: 0.030,
-  DIAMOND_MIN_DEPTH: 6,  DIAMOND_CHANCE: 0.025,
+  // 광물 — 전부 얕고 매우 흔하게
+  COAL_MIN_DEPTH: 1,     COAL_CHANCE: 0.11,
+  IRON_MIN_DEPTH: 1,     IRON_CHANCE: 0.10,
+  AMETHYST_MIN_DEPTH: 1, AMETHYST_CHANCE: 0.10,
+  EMERALD_MIN_DEPTH: 1,  EMERALD_CHANCE: 0.09,
+  RUBY_MIN_DEPTH: 1,     RUBY_CHANCE: 0.09,
+  DIAMOND_MIN_DEPTH: 1,  DIAMOND_CHANCE: 0.08,
 
   // 나무
   TREE_CHANCE: 0.10,   // 컬럼당
@@ -219,7 +219,8 @@ class World {
       const wx = cx * W + lx;
       const surface = surfaces[lx];
       for (let y = surface + 1; y < H; y++) {
-        if (c.blocks[y * W + lx] !== B.STONE) continue;
+        const cur = c.blocks[y * W + lx];
+        if (cur !== B.STONE && cur !== B.DIRT) continue;
         const depth = y - surface;
         // 광물마다 독립 시드 → 분기 순서가 누적 확률에 영향받지 않음
         if (depth >= CONFIG.DIAMOND_MIN_DEPTH && hash2(wx, y, seed + 91) < CONFIG.DIAMOND_CHANCE) {
