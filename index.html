@@ -33,12 +33,13 @@ const CONFIG = {
   CAVE_MIN_DEPTH: 8,     // 표면에서 이만큼 아래부터 동굴 생성
 
   // 광물 (깊이별 등장 확률)
-  COAL_MIN_DEPTH: 5,   COAL_CHANCE: 0.045,
-  IRON_MIN_DEPTH: 15,  IRON_CHANCE: 0.022,
-  AMETHYST_MIN_DEPTH: 25, AMETHYST_CHANCE: 0.010,
-  EMERALD_MIN_DEPTH: 30,  EMERALD_CHANCE: 0.008,
-  RUBY_MIN_DEPTH: 40,     RUBY_CHANCE: 0.007,
-  DIAMOND_MIN_DEPTH: 50,  DIAMOND_CHANCE: 0.005,
+  // 광물 — 전부 얕고 흔하게 (석탄 수준)
+  COAL_MIN_DEPTH: 5,     COAL_CHANCE: 0.045,
+  IRON_MIN_DEPTH: 5,     IRON_CHANCE: 0.040,
+  AMETHYST_MIN_DEPTH: 5, AMETHYST_CHANCE: 0.040,
+  EMERALD_MIN_DEPTH: 5,  EMERALD_CHANCE: 0.035,
+  RUBY_MIN_DEPTH: 5,     RUBY_CHANCE: 0.030,
+  DIAMOND_MIN_DEPTH: 6,  DIAMOND_CHANCE: 0.025,
 
   // 나무
   TREE_CHANCE: 0.10,   // 컬럼당
@@ -220,18 +221,18 @@ class World {
       for (let y = surface + 1; y < H; y++) {
         if (c.blocks[y * W + lx] !== B.STONE) continue;
         const depth = y - surface;
-        const r = hash2(wx, y, seed + 91);
-        if (depth >= CONFIG.DIAMOND_MIN_DEPTH && r < CONFIG.DIAMOND_CHANCE) {
+        // 광물마다 독립 시드 → 분기 순서가 누적 확률에 영향받지 않음
+        if (depth >= CONFIG.DIAMOND_MIN_DEPTH && hash2(wx, y, seed + 91) < CONFIG.DIAMOND_CHANCE) {
           c.blocks[y * W + lx] = B.DIAMOND;
-        } else if (depth >= CONFIG.RUBY_MIN_DEPTH && r < CONFIG.RUBY_CHANCE) {
+        } else if (depth >= CONFIG.RUBY_MIN_DEPTH && hash2(wx, y, seed + 92) < CONFIG.RUBY_CHANCE) {
           c.blocks[y * W + lx] = B.RUBY;
-        } else if (depth >= CONFIG.EMERALD_MIN_DEPTH && r < CONFIG.EMERALD_CHANCE) {
+        } else if (depth >= CONFIG.EMERALD_MIN_DEPTH && hash2(wx, y, seed + 93) < CONFIG.EMERALD_CHANCE) {
           c.blocks[y * W + lx] = B.EMERALD;
-        } else if (depth >= CONFIG.AMETHYST_MIN_DEPTH && r < CONFIG.AMETHYST_CHANCE) {
+        } else if (depth >= CONFIG.AMETHYST_MIN_DEPTH && hash2(wx, y, seed + 94) < CONFIG.AMETHYST_CHANCE) {
           c.blocks[y * W + lx] = B.AMETHYST;
-        } else if (depth >= CONFIG.IRON_MIN_DEPTH && r < CONFIG.IRON_CHANCE) {
+        } else if (depth >= CONFIG.IRON_MIN_DEPTH && hash2(wx, y, seed + 95) < CONFIG.IRON_CHANCE) {
           c.blocks[y * W + lx] = B.IRON;
-        } else if (depth >= CONFIG.COAL_MIN_DEPTH && r < CONFIG.COAL_CHANCE) {
+        } else if (depth >= CONFIG.COAL_MIN_DEPTH && hash2(wx, y, seed + 96) < CONFIG.COAL_CHANCE) {
           c.blocks[y * W + lx] = B.COAL;
         }
       }
